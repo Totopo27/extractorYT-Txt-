@@ -10,6 +10,7 @@ import httpx
 
 from extractoryt.asr.base import AudioTranscriberPort
 from extractoryt.asr.factory import get_transcriber
+from extractoryt.cleaner import clean_sound_artifacts
 from extractoryt.exceptions import (
     ASRTranscriptionError,
     ExtractionError,
@@ -99,6 +100,7 @@ class YouTubeExtractor:
         self,
         video_id: str,
         preferred_languages: Optional[list[str]] = None,
+        clean_noise: bool = True,
     ) -> tuple[list[TranscriptSnippet], str, bool]:
         """
         Fetches timestamped transcript snippets via youtube-transcript-api.
@@ -169,6 +171,8 @@ class YouTubeExtractor:
             snippets: list[TranscriptSnippet] = []
             for item in raw_entries:
                 text = (item.get("text") or "").strip()
+                if clean_noise:
+                    text = clean_sound_artifacts(text)
                 if not text:
                     continue
                 start = float(item.get("start", 0.0))
@@ -236,6 +240,7 @@ class YouTubeExtractor:
         force_asr: bool = False,
         asr_engine: str = "sherpa",
         asr_model: str = "small",
+        clean_noise: bool = True,
         progress_callback: Optional[Callable[[float, str], None]] = None,
     ) -> ExtractionResult:
         """
@@ -266,6 +271,7 @@ class YouTubeExtractor:
                 snippets, language, is_generated = self.fetch_native_transcript(
                     video_id=video_id,
                     preferred_languages=preferred_languages,
+                    clean_noise=clean_noise,
                 )
                 source = "native_generated" if is_generated else "native_manual"
                 if progress_callback:
@@ -310,10 +316,11 @@ class YouTubeExtractor:
                 TranscriptSnippet(
                     start=seg.start_seconds,
                     duration=max(0.1, seg.end_seconds - seg.start_seconds),
-                    text=seg.text,
+                    text=clean_sound_artifacts(seg.text) if clean_noise else seg.text,
                     speaker=seg.speaker,
                 )
                 for seg in asr_result.segments
+                if not clean_noise or clean_sound_artifacts(seg.text)
             ]
             language = asr_result.language or "en"
             is_generated = True

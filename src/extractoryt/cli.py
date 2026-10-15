@@ -90,6 +90,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Model size for ASR engine (e.g. tiny, base, small; default: small).",
     )
     parser.add_argument(
+        "--keep-sound-tags",
+        action="store_true",
+        help="Retain artificial YouTube sound markers like [Música] or [Aplausos].",
+    )
+    parser.add_argument(
         "--timestamps",
         action="store_true",
         help="Include timestamp anchors in plain text output.",
@@ -157,6 +162,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             force_asr=args.force_asr,
             asr_engine=args.asr_engine,
             asr_model=args.asr_model,
+            clean_noise=not args.keep_sound_tags,
             progress_callback=progress_callback if not args.quiet else None,
         )
 
