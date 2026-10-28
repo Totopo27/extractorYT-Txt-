@@ -18,7 +18,7 @@ from extractoryt.exceptions import (
     InvalidYouTubeURLError,
     TranscriptNotFoundError,
 )
-from extractoryt.models import ExtractionResult, TranscriptSnippet, VideoMetadata
+from extractoryt.models import ExtractionResult, TranscriptSnippet, VideoChapter, VideoMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -211,11 +211,60 @@ class YouTubeExtractor:
                 f"Failed to fetch transcript for video ({video_id}): {exc}"
             ) from exc
 
+    def fetch_chapters(
+        self,
+        video_id: str,
+        cookie_file: Optional[str] = None,
+        cookies_from_browser: Optional[str] = None,
+    ) -> list[VideoChapter]:
+        """
+        Retrieves chapters for a YouTube video using yt-dlp metadata inspection.
+        Returns empty list if yt-dlp is not available, fails, or no chapters exist.
+        """
+        try:
+            import yt_dlp
+        except ImportError:
+            return []
+
+        ydl_opts: dict[str, Any] = {
+            "skip_download": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+        if cookies_from_browser:
+            ydl_opts["cookiesfrombrowser"] = (cookies_from_browser.lower(), None, None, None)
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+                if not info:
+                    return []
+                if "entries" in info:
+                    entries = [e for e in info.get("entries", []) if e]
+                    info = entries[0] if entries else {}
+                raw_chapters = info.get("chapters") or []
+                chapters: list[VideoChapter] = []
+                for c in raw_chapters:
+                    chapters.append(
+                        VideoChapter(
+                            title=str(c.get("title", "")),
+                            start=float(c.get("start_time", 0.0)),
+                            end=float(c.get("end_time", 0.0)),
+                        )
+                    )
+                return chapters
+        except Exception as exc:
+            logger.debug("Failed to fetch chapters for video %s: %s", video_id, exc)
+            return []
+
     def download_audio_stream(
         self,
         video_id: str,
         cookie_file: Optional[str] = None,
         cookies_from_browser: Optional[str] = None,
+        metadata: Optional[VideoMetadata] = None,
     ) -> bytes:
         """
         Downloads the audio-only stream of a YouTube video using yt-dlp.
@@ -242,6 +291,17 @@ class YouTubeExtractor:
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+                if metadata is not None and not metadata.chapters and info:
+                    raw_chapters = info.get("chapters") or []
+                    if raw_chapters:
+                        metadata.chapters = [
+                            VideoChapter(
+                                title=str(c.get("title", "")),
+                                start=float(c.get("start_time", 0.0)),
+                                end=float(c.get("end_time", 0.0)),
+                            )
+                            for c in raw_chapters
+                        ]
                 downloaded_file = ydl.prepare_filename(info)
                 with open(downloaded_file, "rb") as f_in:
                     return f_in.read()
@@ -265,6 +325,7 @@ class YouTubeExtractor:
         cookie_file: Optional[str] = None,
         cookies_from_browser: Optional[str] = None,
         progress_callback: Optional[Callable[[float, str], None]] = None,
+        extract_chapters: bool = True,
         **kwargs: Any,
     ) -> ExtractionResult:
         """
@@ -298,6 +359,16 @@ class YouTubeExtractor:
                     clean_noise=clean_noise,
                 )
                 source = "native_generated" if is_generated else "native_manual"
+
+                if extract_chapters and not metadata.chapters:
+                    if progress_callback:
+                        progress_callback(85.0, "Fetching video chapters...")
+                    metadata.chapters = self.fetch_chapters(
+                        video_id=video_id,
+                        cookie_file=cookie_file,
+                        cookies_from_browser=cookies_from_browser,
+                    )
+
                 if progress_callback:
                     progress_callback(100.0, "Native transcript retrieved successfully.")
                 return ExtractionResult(
@@ -332,6 +403,7 @@ class YouTubeExtractor:
                 video_id,
                 cookie_file=cookie_file,
                 cookies_from_browser=cookies_from_browser,
+                metadata=metadata if extract_chapters else None,
             )
 
             if progress_callback:
@@ -357,6 +429,13 @@ class YouTubeExtractor:
             language = asr_result.language or "en"
             is_generated = True
             source = f"asr_{asr_engine.lower()}"
+
+            if extract_chapters and not metadata.chapters:
+                metadata.chapters = self.fetch_chapters(
+                    video_id=video_id,
+                    cookie_file=cookie_file,
+                    cookies_from_browser=cookies_from_browser,
+                )
 
             return ExtractionResult(
                 metadata=metadata,
@@ -636,6 +715,16 @@ class CloudMediaExtractor:
                 thumbnail = entry_info.get("thumbnail") or ""
                 webpage_url = entry_info.get("webpage_url") or url
 
+                raw_chapters = entry_info.get("chapters") or []
+                chapters: list[VideoChapter] = [
+                    VideoChapter(
+                        title=str(c.get("title", "")),
+                        start=float(c.get("start_time", 0.0)),
+                        end=float(c.get("end_time", 0.0)),
+                    )
+                    for c in raw_chapters
+                ]
+
                 metadata = VideoMetadata(
                     video_id=media_id,
                     title=title,
@@ -644,6 +733,7 @@ class CloudMediaExtractor:
                     thumbnail_url=thumbnail,
                     video_url=webpage_url,
                     duration_seconds=duration,
+                    chapters=chapters,
                 )
                 return audio_bytes, metadata
         except Exception as exc:
@@ -747,6 +837,8 @@ class CloudMediaExtractor:
                 f"Offline ASR transcription failed for cloud media ({url}): {exc}"
             ) from exc
 
+    extract_cloud_media = extract
+
 
 class MediaExtractor:
     """
@@ -801,6 +893,7 @@ class MediaExtractor:
         cookie_file: Optional[str] = None,
         cookies_from_browser: Optional[str] = None,
         progress_callback: Optional[Callable[[float, str], None]] = None,
+        extract_chapters: bool = True,
         **kwargs: Any,
     ) -> ExtractionResult:
         """
@@ -824,6 +917,7 @@ class MediaExtractor:
                 device=device,
                 clean_noise=clean_noise,
                 progress_callback=progress_callback,
+                extract_chapters=extract_chapters,
                 **kwargs,
             )
         elif self.is_youtube_url(clean_source):
@@ -839,6 +933,7 @@ class MediaExtractor:
                 cookie_file=cookie_file,
                 cookies_from_browser=cookies_from_browser,
                 progress_callback=progress_callback,
+                extract_chapters=extract_chapters,
                 **kwargs,
             )
         elif self.is_cloud_url(clean_source):
@@ -852,10 +947,14 @@ class MediaExtractor:
                 cookie_file=cookie_file,
                 cookies_from_browser=cookies_from_browser,
                 progress_callback=progress_callback,
+                extract_chapters=extract_chapters,
                 **kwargs,
             )
         else:
             raise ValueError(
                 f"Unsupported media source: '{source}'. Source must be an existing local file, a valid YouTube URL/ID, or a supported cloud URL (Google Drive, OneDrive)."
             )
+
+
+YouTubeTranscriptExtractor = YouTubeExtractor
 

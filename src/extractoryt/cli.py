@@ -115,6 +115,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Include timestamp anchors in plain text output.",
     )
     parser.add_argument(
+        "--no-chapters",
+        action="store_true",
+        help="Disable automatic extraction and formatting of video chapters.",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -188,6 +193,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cookie_file=args.cookies,
             cookies_from_browser=args.cookies_from_browser,
             progress_callback=progress_callback if not args.quiet else None,
+            extract_chapters=not args.no_chapters,
         )
 
         formatted_output = _format_result(
@@ -204,6 +210,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f_out.write(formatted_output)
 
             log_status(f"Saved transcript to: '{args.output}'")
+            if result.metadata.chapters:
+                log_status(f"Extracted {len(result.metadata.chapters)} chapters.")
             if use_rich and console:
                 from rich.table import Table
 
@@ -214,6 +222,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 table.add_row("Author", result.metadata.author_name)
                 table.add_row("Language", result.language)
                 table.add_row("Source", result.source)
+                if result.metadata.chapters:
+                    table.add_row("Chapters", str(len(result.metadata.chapters)))
                 table.add_row("Snippets", str(len(result.snippets)))
                 table.add_row("Output Path", args.output)
                 console.print(table)

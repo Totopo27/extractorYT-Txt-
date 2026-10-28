@@ -50,3 +50,9 @@ models/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local test outputs & transcripts
+*_transcript.md
+video_info.json
+video_info.md
+

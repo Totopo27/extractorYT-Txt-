@@ -89,6 +89,12 @@ class MarkdownFormatter:
         if meta.thumbnail_url:
             lines.extend(["", f"![Video Thumbnail]({meta.thumbnail_url})"])
 
+        if meta.chapters:
+            lines.extend(["", "---", "", "## Chapters", ""])
+            for ch in meta.chapters:
+                ts = format_timestamp(ch.start)
+                lines.append(f"- **[{ts}]** {ch.title.strip()}")
+
         lines.extend(["", "---", "", "## Structured Transcript", ""])
 
         if not result.snippets:
@@ -99,24 +105,43 @@ class MarkdownFormatter:
         current_paragraph_start = float(result.snippets[0].start)
         last_heading_time = -self.heading_interval_seconds
 
+        has_chapters = bool(meta.chapters)
+        sorted_chapters = sorted(meta.chapters, key=lambda c: c.start) if has_chapters else []
+        next_chapter_idx = 0
+
         for snippet in result.snippets:
             start = float(snippet.start)
             text = snippet.text.strip()
             if not text:
                 continue
 
-            # Heading break every heading_interval_seconds (default 5 minutes)
-            if start - last_heading_time >= self.heading_interval_seconds:
-                if current_paragraph_texts:
-                    ts_str = format_timestamp(current_paragraph_start)
-                    p_body = " ".join(current_paragraph_texts)
-                    lines.append(f"**[{ts_str}]** {p_body}\n")
-                    current_paragraph_texts = []
+            if has_chapters:
+                # Heading aligned with video chapters
+                while next_chapter_idx < len(sorted_chapters) and start >= sorted_chapters[next_chapter_idx].start:
+                    if current_paragraph_texts:
+                        ts_str = format_timestamp(current_paragraph_start)
+                        p_body = " ".join(current_paragraph_texts)
+                        lines.append(f"**[{ts_str}]** {p_body}\n")
+                        current_paragraph_texts = []
 
-                header_ts = format_timestamp(start)
-                lines.append(f"\n### [{header_ts}] Timestamp {header_ts}\n")
-                last_heading_time = start
-                current_paragraph_start = start
+                    ch = sorted_chapters[next_chapter_idx]
+                    header_ts = format_timestamp(ch.start)
+                    lines.append(f"\n### [{header_ts}] {ch.title.strip()}\n")
+                    current_paragraph_start = start
+                    next_chapter_idx += 1
+            else:
+                # Heading break every heading_interval_seconds (default 5 minutes)
+                if start - last_heading_time >= self.heading_interval_seconds:
+                    if current_paragraph_texts:
+                        ts_str = format_timestamp(current_paragraph_start)
+                        p_body = " ".join(current_paragraph_texts)
+                        lines.append(f"**[{ts_str}]** {p_body}\n")
+                        current_paragraph_texts = []
+
+                    header_ts = format_timestamp(start)
+                    lines.append(f"\n### [{header_ts}] Timestamp {header_ts}\n")
+                    last_heading_time = start
+                    current_paragraph_start = start
 
             current_paragraph_texts.append(text)
             accumulated_len = sum(len(t) for t in current_paragraph_texts)

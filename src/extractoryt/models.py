@@ -32,6 +32,23 @@ class TranscriptSnippet:
 
 
 @dataclass
+class VideoChapter:
+    """A timestamped chapter marker for a video."""
+
+    title: str
+    start: float
+    end: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serializes chapter to dictionary."""
+        return {
+            "title": self.title,
+            "start": round(self.start, 3),
+            "end": round(self.end, 3),
+        }
+
+
+@dataclass
 class VideoMetadata:
     """Metadata for a YouTube video retrieved via oEmbed or direct extraction."""
 
@@ -42,6 +59,7 @@ class VideoMetadata:
     thumbnail_url: str = ""
     video_url: str = ""
     duration_seconds: Optional[float] = None
+    chapters: list[VideoChapter] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.video_url and self.video_id:
@@ -61,6 +79,7 @@ class VideoMetadata:
             "thumbnail_url": self.thumbnail_url,
             "video_url": self.video_url,
             "duration_seconds": self.duration_seconds,
+            "chapters": [c.to_dict() for c in self.chapters],
         }
 
 
