@@ -49,6 +49,8 @@ class SherpaOnnxTranscriber(AudioTranscriberPort):
         model_size: str = "small",
         num_threads: int = 4,
         default_language: str = "",
+        device: str = "cpu",
+        **kwargs: Any,
     ) -> None:
         if models_dir:
             self.models_dir = str(models_dir)
@@ -62,6 +64,7 @@ class SherpaOnnxTranscriber(AudioTranscriberPort):
         self.model_size = model_size.lower()
         self.num_threads = num_threads
         self.default_language = default_language
+        self.device = device
         self._recognizer: Optional[Any] = None
         self._vad: Optional[Any] = None
 

@@ -65,6 +65,15 @@ extractoryt https://www.youtube.com/watch?v=dQw4w9WgXcQ
 # Save structured Markdown to a file
 extractoryt https://www.youtube.com/watch?v=dQw4w9WgXcQ -o transcript.md
 
+# Process a Google Drive video directly (streams audio only, no full video download)
+extractoryt "https://drive.google.com/file/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/view?usp=sharing" -o drive_transcript.md
+
+# Process a OneDrive / SharePoint video directly
+extractoryt "https://1drv.ms/v/s!Ah3_example" -o onedrive_transcript.md
+
+# Use browser cookies for private Drive / OneDrive / YouTube media
+extractoryt "https://drive.google.com/file/d/PRIVATE_FILE_ID/view" --cookies-from-browser chrome -o private.md
+
 # Export as SubRip subtitles (.srt)
 extractoryt https://www.youtube.com/watch?v=dQw4w9WgXcQ -f srt -o subtitles.srt
 
@@ -91,7 +100,7 @@ extractoryt https://youtu.be/dQw4w9WgXcQ -q > transcript.md
 
 | Option | Description | Default |
 | ------ | ----------- | ------- |
-| `url` | YouTube video URL or 11-char ID | *(Required)* |
+| `source` | YouTube URL/ID, local media file, or Google Drive / OneDrive link | *(Required)* |
 | `-f, --format` | Output format: `markdown`, `text`, `json`, `srt`, `vtt` | `markdown` |
 | `-o, --output` | Target file path (`-` for stdout) | `-` |
 | `-l, --lang` | Comma-separated preferred language codes | `es,en` |
@@ -99,6 +108,8 @@ extractoryt https://youtu.be/dQw4w9WgXcQ -q > transcript.md
 | `--force-asr` | Force ASR transcription, ignoring native subtitles | `False` |
 | `--asr-engine` | Engine for speech recognition: `sherpa` or `faster-whisper` | `sherpa` |
 | `--asr-model` | Whisper model size (`tiny`, `base`, `small`, `medium`) | `small` |
+| `--cookies` | Path to cookies.txt for private media authentication | `None` |
+| `--cookies-from-browser` | Extract cookies from browser (`chrome`, `edge`, `firefox`, etc.) | `None` |
 | `--timestamps` | Include timestamps in plain text format | `False` |
 | `-q, --quiet` | Suppress status and progress output | `False` |
 | `--version` | Display version and exit | |

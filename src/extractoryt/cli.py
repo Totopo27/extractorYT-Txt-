@@ -1,10 +1,11 @@
 """Command-line interface (CLI) for extractorYT-Txt."""
 
 import argparse
+import os
 import sys
 from typing import Optional
 
-from extractoryt.core import YouTubeExtractor
+from extractoryt.core import MediaExtractor, YouTubeExtractor
 from extractoryt.exceptions import ExtractionError
 from extractoryt.formatters import (
     JsonFormatter,
@@ -43,11 +44,11 @@ def create_parser() -> argparse.ArgumentParser:
     """Builds the argument parser for extractorYT CLI."""
     parser = argparse.ArgumentParser(
         prog="extractoryt",
-        description="High-fidelity YouTube transcript & audio-to-text extraction with offline ASR fallback.",
+        description="High-fidelity YouTube, Google Drive, OneDrive & audio-to-text extraction with offline ASR fallback.",
     )
     parser.add_argument(
-        "url",
-        help="YouTube video URL or 11-character video ID.",
+        "source",
+        help="YouTube video URL/ID, cloud storage URL (Google Drive, OneDrive), or local media file path (MP4, MKV, MP3, WAV, etc.).",
     )
     parser.add_argument(
         "-f",
@@ -88,6 +89,20 @@ def create_parser() -> argparse.ArgumentParser:
         "--asr-model",
         default="small",
         help="Model size for ASR engine (e.g. tiny, base, small; default: small).",
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Inference device for ASR engine (choices: auto, cuda, cpu; default: auto).",
+    )
+    parser.add_argument(
+        "--cookies",
+        help="Path to cookies.txt file for authenticated extraction (Google Drive, OneDrive, YouTube).",
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        help="Extract cookies from a browser (e.g. chrome, firefox, edge, brave) for authenticated access.",
     )
     parser.add_argument(
         "--keep-sound-tags",
@@ -150,19 +165,28 @@ def main(argv: Optional[list[str]] = None) -> int:
             sys.stderr.write(f"  [{pct:5.1f}%] {message}\n")
             sys.stderr.flush()
 
-    log_status(f"Processing YouTube video target: '{args.url}'")
+    is_local = os.path.isfile(args.source)
+    extractor = MediaExtractor(default_languages=languages)
 
-    extractor = YouTubeExtractor(default_languages=languages)
+    if is_local:
+        log_status(f"Processing local media file target: '{args.source}'")
+    elif extractor.is_cloud_url(args.source):
+        log_status(f"Processing cloud media target: '{args.source}'")
+    else:
+        log_status(f"Processing YouTube video target: '{args.source}'")
 
     try:
         result = extractor.extract(
-            url_or_id=args.url,
+            source=args.source,
             preferred_languages=languages,
             fallback_to_asr=not args.no_fallback,
             force_asr=args.force_asr,
             asr_engine=args.asr_engine,
             asr_model=args.asr_model,
+            device=args.device,
             clean_noise=not args.keep_sound_tags,
+            cookie_file=args.cookies,
+            cookies_from_browser=args.cookies_from_browser,
             progress_callback=progress_callback if not args.quiet else None,
         )
 
@@ -196,7 +220,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         return 0
 
-    except ExtractionError as exc:
+    except (ExtractionError, ValueError, FileNotFoundError) as exc:
         if use_rich and console:
             console.print(f"[bold red]Extraction Error:[/bold red] {exc}")
         else:

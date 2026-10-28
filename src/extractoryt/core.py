@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+from pathlib import Path
 from typing import Any, Callable, Optional, Union
 import httpx
 
@@ -27,6 +28,16 @@ YOUTUBE_URL_PATTERN = re.compile(
 )
 
 YOUTUBE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{11}$")
+
+GDRIVE_URL_PATTERN = re.compile(
+    r"^(?:https?:\/\/)?(?:drive\.google\.com\/(?:(?:u\/\d+\/)?file\/d\/|open\?(?:.*&)?id=|uc\?(?:.*&)?id=|drive\/folders\/)|docs\.google\.com\/(?:(?:u\/\d+\/)?file\/d\/))([a-zA-Z0-9_-]+)",
+    re.IGNORECASE,
+)
+
+ONEDRIVE_URL_PATTERN = re.compile(
+    r"^(?:https?:\/\/)?(?:1drv\.ms\/|onedrive\.live\.com\/|(?:[a-zA-Z0-9_-]+\.)*sharepoint\.com\/)",
+    re.IGNORECASE,
+)
 
 
 class YouTubeExtractor:
@@ -200,7 +211,12 @@ class YouTubeExtractor:
                 f"Failed to fetch transcript for video ({video_id}): {exc}"
             ) from exc
 
-    def download_audio_stream(self, video_id: str) -> bytes:
+    def download_audio_stream(
+        self,
+        video_id: str,
+        cookie_file: Optional[str] = None,
+        cookies_from_browser: Optional[str] = None,
+    ) -> bytes:
         """
         Downloads the audio-only stream of a YouTube video using yt-dlp.
         Returns the raw audio bytes without requiring external ffmpeg installed.
@@ -212,12 +228,16 @@ class YouTubeExtractor:
 
         temp_dir = tempfile.mkdtemp(prefix="extractoryt_audio_")
         target_template = os.path.join(temp_dir, f"{video_id}.%(ext)s")
-        ydl_opts = {
+        ydl_opts: dict[str, Any] = {
             "format": "bestaudio/best",
             "outtmpl": target_template,
             "quiet": True,
             "no_warnings": True,
         }
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+        if cookies_from_browser:
+            ydl_opts["cookiesfrombrowser"] = (cookies_from_browser.lower(), None, None, None)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -240,8 +260,12 @@ class YouTubeExtractor:
         force_asr: bool = False,
         asr_engine: str = "sherpa",
         asr_model: str = "small",
+        device: str = "auto",
         clean_noise: bool = True,
+        cookie_file: Optional[str] = None,
+        cookies_from_browser: Optional[str] = None,
         progress_callback: Optional[Callable[[float, str], None]] = None,
+        **kwargs: Any,
     ) -> ExtractionResult:
         """
         Executes complete extraction workflow:
@@ -294,13 +318,21 @@ class YouTubeExtractor:
         # Fallback or Forced ASR Flow
         transcriber = self.audio_transcriber
         if transcriber is None:
-            transcriber = get_transcriber(engine=asr_engine, model_size=asr_model)
+            transcriber = get_transcriber(
+                engine=asr_engine,
+                model_size=asr_model,
+                device=device,
+            )
 
         if progress_callback:
             progress_callback(15.0, "Downloading audio stream with yt-dlp...")
 
         try:
-            audio_bytes = self.download_audio_stream(video_id)
+            audio_bytes = self.download_audio_stream(
+                video_id,
+                cookie_file=cookie_file,
+                cookies_from_browser=cookies_from_browser,
+            )
 
             if progress_callback:
                 progress_callback(30.0, "Transcribing audio with ASR engine...")
@@ -339,3 +371,491 @@ class YouTubeExtractor:
             raise ASRTranscriptionError(
                 f"Offline ASR transcription failed for video ({video_id}): {exc}"
             ) from exc
+
+
+class LocalMediaExtractor:
+    """
+    High-fidelity extractor for local media files (MP4, MKV, MP3, WAV, etc.)
+    using PyAV for metadata inspection and offline ASR for transcription.
+    """
+
+    def __init__(
+        self,
+        audio_transcriber: Optional[AudioTranscriberPort] = None,
+        default_languages: Optional[list[str]] = None,
+    ) -> None:
+        self.audio_transcriber = audio_transcriber
+        self.default_languages = default_languages or ["es", "es-419", "en"]
+
+    def read_metadata(self, file_path: Union[str, Path]) -> tuple[VideoMetadata, Optional[str]]:
+        """
+        Reads local media file metadata using PyAV.
+        Returns a tuple of (VideoMetadata, container_format_name).
+        """
+        try:
+            import av
+        except ImportError as exc:
+            raise ImportError(
+                "PyAV (av) is required for local media extraction. "
+                "Install it with: pip install av"
+            ) from exc
+
+        path = Path(file_path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Local media file not found: '{file_path}'")
+
+        filename = path.name
+        file_stem = path.stem
+        duration: Optional[float] = None
+        format_name: Optional[str] = None
+
+        try:
+            with av.open(str(path)) as container:
+                audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+                if not audio_stream:
+                    raise ExtractionError(f"No audio stream found in local media file: '{path}'")
+
+                if container.duration is not None and container.duration > 0:
+                    duration = float(container.duration) / 1_000_000.0
+
+                if container.format and container.format.name:
+                    format_name = container.format.name
+        except ExtractionError:
+            raise
+        except Exception as exc:
+            raise ExtractionError(f"Failed to inspect media file '{path}' with av: {exc}") from exc
+
+        metadata = VideoMetadata(
+            video_id=filename,
+            title=file_stem,
+            author_name="Local Media",
+            video_url=str(file_path),
+            duration_seconds=duration,
+        )
+        return metadata, format_name
+
+    def extract(
+        self,
+        file_path: Union[str, Path],
+        preferred_languages: Optional[list[str]] = None,
+        asr_engine: str = "sherpa",
+        asr_model: str = "small",
+        device: str = "auto",
+        clean_noise: bool = True,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        **kwargs: Any,
+    ) -> ExtractionResult:
+        """
+        Extracts transcript from a local media file using the specified ASR engine.
+        """
+        str_path = str(file_path)
+        if not os.path.isfile(str_path):
+            raise FileNotFoundError(f"Local media file not found: '{file_path}'")
+
+        path = Path(file_path)
+        filename = path.name
+        file_stem = path.stem
+
+        if progress_callback:
+            progress_callback(5.0, f"Inspecting local media file '{filename}'...")
+
+        metadata, _ = self.read_metadata(file_path)
+
+        transcriber = self.audio_transcriber
+        if transcriber is None:
+            transcriber = get_transcriber(
+                engine=asr_engine,
+                model_size=asr_model,
+                device=device,
+            )
+
+        if progress_callback:
+            progress_callback(15.0, f"Transcribing audio with {asr_engine} engine...")
+
+        langs = preferred_languages or self.default_languages
+        target_lang = langs[0] if langs else None
+
+        try:
+            asr_result = transcriber.transcribe(
+                str_path,
+                progress_callback=progress_callback,
+                language=target_lang,
+            )
+
+            snippets = [
+                TranscriptSnippet(
+                    start=seg.start_seconds,
+                    duration=max(0.1, seg.end_seconds - seg.start_seconds),
+                    text=clean_sound_artifacts(seg.text) if clean_noise else seg.text,
+                    speaker=seg.speaker,
+                )
+                for seg in asr_result.segments
+                if not clean_noise or clean_sound_artifacts(seg.text)
+            ]
+
+            if metadata.duration_seconds is None or metadata.duration_seconds <= 0:
+                if asr_result.duration_seconds > 0:
+                    metadata.duration_seconds = asr_result.duration_seconds
+                elif snippets:
+                    metadata.duration_seconds = snippets[-1].end
+
+            language = asr_result.language or (target_lang or "en")
+            is_generated = True
+            source = f"local_{asr_engine.lower()}"
+
+            if progress_callback:
+                progress_callback(100.0, "Local media transcription completed successfully.")
+
+            return ExtractionResult(
+                metadata=metadata,
+                snippets=snippets,
+                language=language,
+                is_generated=is_generated,
+                source=source,
+            )
+        except Exception as exc:
+            if isinstance(exc, ExtractionError):
+                raise
+            raise ASRTranscriptionError(
+                f"Offline ASR transcription failed for local media file ({filename}): {exc}"
+            ) from exc
+
+
+class CloudMediaExtractor:
+    """
+    High-fidelity extractor for cloud media storage (Google Drive, OneDrive / SharePoint)
+    using yt-dlp for audio streaming and offline ASR for transcription.
+    """
+
+    def __init__(
+        self,
+        audio_transcriber: Optional[AudioTranscriberPort] = None,
+        default_languages: Optional[list[str]] = None,
+    ) -> None:
+        self.audio_transcriber = audio_transcriber
+        self.default_languages = default_languages or ["es", "es-419", "en"]
+
+    @staticmethod
+    def is_cloud_url(url: str) -> bool:
+        """Determines if a given URL or string matches a supported cloud storage pattern."""
+        if not url:
+            return False
+        clean = url.strip()
+        return bool(GDRIVE_URL_PATTERN.search(clean) or ONEDRIVE_URL_PATTERN.search(clean))
+
+    @staticmethod
+    def detect_service(url: str) -> str:
+        """Identifies the cloud storage service ("gdrive", "onedrive", or "cloud")."""
+        if not url:
+            return "cloud"
+        clean = url.strip()
+        if GDRIVE_URL_PATTERN.search(clean):
+            return "gdrive"
+        if ONEDRIVE_URL_PATTERN.search(clean):
+            return "onedrive"
+        return "cloud"
+
+    def download_audio_stream(
+        self,
+        url: str,
+        cookie_file: Optional[str] = None,
+        cookies_from_browser: Optional[str] = None,
+    ) -> tuple[bytes, VideoMetadata]:
+        """
+        Downloads the audio-only stream from a cloud URL using yt-dlp.
+        Returns the raw audio bytes and extracted VideoMetadata.
+        """
+        try:
+            import yt_dlp
+        except ImportError as exc:
+            raise ImportError("yt-dlp is required. Install with: pip install yt-dlp") from exc
+
+        service = self.detect_service(url)
+        temp_dir = tempfile.mkdtemp(prefix="extractoryt_cloud_")
+        target_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
+        ydl_opts: dict[str, Any] = {
+            "format": "bestaudio/best",
+            "outtmpl": target_template,
+            "quiet": True,
+            "no_warnings": True,
+        }
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+        if cookies_from_browser:
+            ydl_opts["cookiesfrombrowser"] = (cookies_from_browser.lower(), None, None, None)
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if not info:
+                    raise ExtractionError(f"No media information could be extracted from cloud URL: '{url}'")
+
+                if "entries" in info:
+                    entries = [e for e in info.get("entries", []) if e]
+                    if not entries:
+                        raise ExtractionError(f"No media entries found at cloud URL: '{url}'")
+                    entry_info = entries[0]
+                else:
+                    entry_info = info
+
+                downloaded_file = ydl.prepare_filename(entry_info)
+                if not os.path.isfile(downloaded_file):
+                    files = [
+                        os.path.join(temp_dir, f)
+                        for f in os.listdir(temp_dir)
+                        if os.path.isfile(os.path.join(temp_dir, f))
+                    ]
+                    if files:
+                        downloaded_file = files[0]
+                    else:
+                        raise ExtractionError(
+                            f"Downloaded cloud audio file not found in temporary directory: {temp_dir}"
+                        )
+
+                with open(downloaded_file, "rb") as f_in:
+                    audio_bytes = f_in.read()
+
+                media_id = str(entry_info.get("id") or "cloud_media")
+                default_title = (
+                    "Google Drive Media" if service == "gdrive" else (
+                        "OneDrive Media" if service == "onedrive" else "Cloud Media"
+                    )
+                )
+                title = entry_info.get("title") or default_title
+                default_author = (
+                    "Google Drive" if service == "gdrive" else (
+                        "OneDrive" if service == "onedrive" else "Cloud Media"
+                    )
+                )
+                author_name = entry_info.get("uploader") or entry_info.get("channel") or default_author
+                duration = (
+                    float(entry_info["duration"])
+                    if entry_info.get("duration") is not None
+                    else None
+                )
+                thumbnail = entry_info.get("thumbnail") or ""
+                webpage_url = entry_info.get("webpage_url") or url
+
+                metadata = VideoMetadata(
+                    video_id=media_id,
+                    title=title,
+                    author_name=author_name,
+                    author_url=entry_info.get("uploader_url") or "",
+                    thumbnail_url=thumbnail,
+                    video_url=webpage_url,
+                    duration_seconds=duration,
+                )
+                return audio_bytes, metadata
+        except Exception as exc:
+            if isinstance(exc, ExtractionError):
+                raise
+            raise ExtractionError(
+                f"Failed to download cloud audio stream from ({url}): {exc}"
+            ) from exc
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def extract(
+        self,
+        url: str,
+        preferred_languages: Optional[list[str]] = None,
+        asr_engine: str = "sherpa",
+        asr_model: str = "small",
+        device: str = "auto",
+        clean_noise: bool = True,
+        cookie_file: Optional[str] = None,
+        cookies_from_browser: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        **kwargs: Any,
+    ) -> ExtractionResult:
+        """
+        Downloads cloud audio stream and transcribes via ASR engine.
+        """
+        if not self.is_cloud_url(url):
+            raise ValueError(f"Invalid cloud media URL: '{url}'")
+
+        service = self.detect_service(url)
+        service_display = (
+            "Google Drive" if service == "gdrive" else ("OneDrive" if service == "onedrive" else "Cloud")
+        )
+
+        if progress_callback:
+            progress_callback(5.0, f"Downloading audio from {service_display} with yt-dlp...")
+
+        audio_bytes, metadata = self.download_audio_stream(
+            url,
+            cookie_file=cookie_file,
+            cookies_from_browser=cookies_from_browser,
+        )
+
+        transcriber = self.audio_transcriber
+        if transcriber is None:
+            transcriber = get_transcriber(
+                engine=asr_engine,
+                model_size=asr_model,
+                device=device,
+            )
+
+        if progress_callback:
+            progress_callback(30.0, f"Transcribing audio with {asr_engine} engine...")
+
+        langs = preferred_languages or self.default_languages
+        target_lang = langs[0] if langs else None
+
+        try:
+            asr_result = transcriber.transcribe(
+                audio_bytes,
+                progress_callback=progress_callback,
+                language=target_lang,
+            )
+
+            snippets = [
+                TranscriptSnippet(
+                    start=seg.start_seconds,
+                    duration=max(0.1, seg.end_seconds - seg.start_seconds),
+                    text=clean_sound_artifacts(seg.text) if clean_noise else seg.text,
+                    speaker=seg.speaker,
+                )
+                for seg in asr_result.segments
+                if not clean_noise or clean_sound_artifacts(seg.text)
+            ]
+
+            if metadata.duration_seconds is None or metadata.duration_seconds <= 0:
+                if asr_result.duration_seconds > 0:
+                    metadata.duration_seconds = asr_result.duration_seconds
+                elif snippets:
+                    metadata.duration_seconds = snippets[-1].end
+
+            language = asr_result.language or (target_lang or "en")
+            is_generated = True
+            source = f"{service}_{asr_engine.lower()}"
+
+            if progress_callback:
+                progress_callback(100.0, f"{service_display} media transcription completed successfully.")
+
+            return ExtractionResult(
+                metadata=metadata,
+                snippets=snippets,
+                language=language,
+                is_generated=is_generated,
+                source=source,
+            )
+        except Exception as exc:
+            if isinstance(exc, ExtractionError):
+                raise
+            raise ASRTranscriptionError(
+                f"Offline ASR transcription failed for cloud media ({url}): {exc}"
+            ) from exc
+
+
+class MediaExtractor:
+    """
+    Unified dispatcher / facade for extracting transcripts from local media files,
+    YouTube, or cloud storage (Google Drive, OneDrive / SharePoint).
+    """
+
+    def __init__(
+        self,
+        youtube_extractor: Optional[YouTubeExtractor] = None,
+        local_extractor: Optional[LocalMediaExtractor] = None,
+        cloud_extractor: Optional[CloudMediaExtractor] = None,
+        audio_transcriber: Optional[AudioTranscriberPort] = None,
+        default_languages: Optional[list[str]] = None,
+    ) -> None:
+        self.default_languages = default_languages or ["es", "es-419", "en"]
+        self.youtube_extractor = youtube_extractor or YouTubeExtractor(
+            audio_transcriber=audio_transcriber,
+            default_languages=self.default_languages,
+        )
+        self.local_extractor = local_extractor or LocalMediaExtractor(
+            audio_transcriber=audio_transcriber,
+            default_languages=self.default_languages,
+        )
+        self.cloud_extractor = cloud_extractor or CloudMediaExtractor(
+            audio_transcriber=audio_transcriber,
+            default_languages=self.default_languages,
+        )
+
+    def is_local_file(self, source: str) -> bool:
+        """Determines if the provided source points to an existing local file."""
+        return bool(source and os.path.isfile(source.strip()))
+
+    def is_youtube_url(self, source: str) -> bool:
+        """Determines if the provided source matches a YouTube URL or video ID."""
+        return bool(source and self.youtube_extractor.is_youtube_url(source.strip()))
+
+    def is_cloud_url(self, source: str) -> bool:
+        """Determines if the provided source matches a Google Drive or OneDrive URL."""
+        return bool(source and self.cloud_extractor.is_cloud_url(source.strip()))
+
+    def extract(
+        self,
+        source: str,
+        preferred_languages: Optional[list[str]] = None,
+        fallback_to_asr: bool = True,
+        force_asr: bool = False,
+        asr_engine: str = "sherpa",
+        asr_model: str = "small",
+        device: str = "auto",
+        clean_noise: bool = True,
+        cookie_file: Optional[str] = None,
+        cookies_from_browser: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        **kwargs: Any,
+    ) -> ExtractionResult:
+        """
+        Inspects the source string.
+        If is_local_file -> delegates to LocalMediaExtractor.
+        If is_youtube_url -> delegates to YouTubeExtractor.
+        If is_cloud_url -> delegates to CloudMediaExtractor.
+        Else raises ValueError or appropriate error.
+        """
+        if not source:
+            raise ValueError("Media source cannot be empty.")
+
+        clean_source = source.strip()
+
+        if self.is_local_file(clean_source):
+            return self.local_extractor.extract(
+                file_path=clean_source,
+                preferred_languages=preferred_languages,
+                asr_engine=asr_engine,
+                asr_model=asr_model,
+                device=device,
+                clean_noise=clean_noise,
+                progress_callback=progress_callback,
+                **kwargs,
+            )
+        elif self.is_youtube_url(clean_source):
+            return self.youtube_extractor.extract(
+                url_or_id=clean_source,
+                preferred_languages=preferred_languages,
+                fallback_to_asr=fallback_to_asr,
+                force_asr=force_asr,
+                asr_engine=asr_engine,
+                asr_model=asr_model,
+                device=device,
+                clean_noise=clean_noise,
+                cookie_file=cookie_file,
+                cookies_from_browser=cookies_from_browser,
+                progress_callback=progress_callback,
+                **kwargs,
+            )
+        elif self.is_cloud_url(clean_source):
+            return self.cloud_extractor.extract(
+                url=clean_source,
+                preferred_languages=preferred_languages,
+                asr_engine=asr_engine,
+                asr_model=asr_model,
+                device=device,
+                clean_noise=clean_noise,
+                cookie_file=cookie_file,
+                cookies_from_browser=cookies_from_browser,
+                progress_callback=progress_callback,
+                **kwargs,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported media source: '{source}'. Source must be an existing local file, a valid YouTube URL/ID, or a supported cloud URL (Google Drive, OneDrive)."
+            )
+

@@ -1,7 +1,7 @@
 """extractorYT-Txt: High-fidelity YouTube transcript & audio-to-text extraction pipeline."""
 
 from extractoryt.cleaner import clean_sound_artifacts
-from extractoryt.core import YouTubeExtractor
+from extractoryt.core import CloudMediaExtractor, LocalMediaExtractor, MediaExtractor, YouTubeExtractor
 from extractoryt.exceptions import (
     ASRTranscriptionError,
     ExtractionError,
@@ -22,6 +22,9 @@ __version__ = "0.1.0"
 
 __all__ = [
     "YouTubeExtractor",
+    "LocalMediaExtractor",
+    "CloudMediaExtractor",
+    "MediaExtractor",
     "clean_sound_artifacts",
     "ExtractionResult",
     "TranscriptSnippet",

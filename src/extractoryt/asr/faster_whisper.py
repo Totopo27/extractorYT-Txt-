@@ -2,6 +2,8 @@
 
 import io
 import logging
+import os
+import sys
 from typing import Any, Callable, Optional, Union
 import numpy as np
 
@@ -9,6 +11,37 @@ from extractoryt.asr.base import AudioSegment, AudioTranscriptResult, AudioTrans
 from extractoryt.asr.decoder import decode_audio_to_pcm
 
 logger = logging.getLogger(__name__)
+
+
+def _register_nvidia_dll_directories() -> None:
+    """On Windows, registers NVIDIA pip package DLL directories into DLL search path if available."""
+    if sys.platform != "win32":
+        return
+    try:
+        import site
+
+        roots = []
+        try:
+            roots.extend(site.getsitepackages())
+        except AttributeError:
+            pass
+        try:
+            roots.append(site.getusersitepackages())
+        except AttributeError:
+            pass
+
+        for p in roots:
+            nvidia_dir = os.path.join(p, "nvidia")
+            if os.path.isdir(nvidia_dir):
+                for root, _, files in os.walk(nvidia_dir):
+                    if any(f.lower().endswith(".dll") for f in files):
+                        try:
+                            os.add_dll_directory(root)
+                        except (AttributeError, OSError):
+                            pass
+                        os.environ["PATH"] = root + os.pathsep + os.environ.get("PATH", "")
+    except Exception as exc:
+        logger.debug("Could not auto-register NVIDIA DLL directories: %s", exc)
 
 
 class FasterWhisperTranscriber(AudioTranscriberPort):
@@ -39,6 +72,8 @@ class FasterWhisperTranscriber(AudioTranscriberPort):
         if self._model is not None:
             return
 
+        _register_nvidia_dll_directories()
+
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -50,14 +85,31 @@ class FasterWhisperTranscriber(AudioTranscriberPort):
         if progress_callback:
             progress_callback(10.0, f"Loading faster-whisper model '{self.model_size}'...")
 
-        # Determine safe compute_type if default
+        device = self.device
         compute = self.compute_type
-        if compute == "default":
-            compute = "int8" if self.device == "cpu" or self.device == "auto" else "float16"
+
+        if device == "auto":
+            try:
+                import ctranslate2
+
+                if ctranslate2.get_cuda_device_count() > 0:
+                    device = "cuda"
+                    compute = "float16"
+                else:
+                    device = "cpu"
+                    compute = "int8"
+            except Exception as exc:
+                logger.warning(
+                    "Could not detect CUDA device count via ctranslate2: %s. Defaulting to CPU.", exc
+                )
+                device = "cpu"
+                compute = "int8"
+        elif compute == "default":
+            compute = "int8" if device == "cpu" else "float16"
 
         self._model = WhisperModel(
             self.model_size,
-            device=self.device,
+            device=device,
             compute_type=compute,
             cpu_threads=self.num_threads,
         )
@@ -92,24 +144,54 @@ class FasterWhisperTranscriber(AudioTranscriberPort):
             progress_callback(25.0, "Transcribing audio segments with faster-whisper...")
 
         lang = language or self.default_language
-        segments_gen, info = self._model.transcribe(
-            samples,
-            language=lang,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
 
-        audio_segments: list[AudioSegment] = []
-        for segment in segments_gen:
-            text = segment.text.strip()
-            if text:
-                audio_segments.append(
-                    AudioSegment(
-                        start_seconds=float(segment.start),
-                        end_seconds=float(segment.end),
-                        text=text,
+        def _run_transcription(model: Any, is_retry: bool = False) -> tuple[list[AudioSegment], Any]:
+            segments_gen, info = model.transcribe(
+                samples,
+                language=lang,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            audio_segs: list[AudioSegment] = []
+            last_pct = 25.0
+            for segment in segments_gen:
+                text = segment.text.strip()
+                if text:
+                    audio_segs.append(
+                        AudioSegment(
+                            start_seconds=float(segment.start),
+                            end_seconds=float(segment.end),
+                            text=text,
+                        )
                     )
-                )
+                if progress_callback and duration > 0:
+                    current_pct = 25.0 + (float(segment.end) / duration) * 70.0
+                    if current_pct - last_pct >= 5.0 or current_pct >= 94.0:
+                        last_pct = current_pct
+                        label = "Transcribing audio (CPU fallback)" if is_retry else "Transcribing audio"
+                        progress_callback(
+                            min(95.0, current_pct),
+                            f"{label}: {segment.end:.1f}s / {duration:.1f}s ({min(95.0, current_pct):.1f}%)",
+                        )
+            return audio_segs, info
+
+        try:
+            audio_segments, info = _run_transcription(self._model)
+        except RuntimeError as exc:
+            logger.warning(
+                "faster-whisper inference failed on current device: %s. Falling back to CPU.", exc
+            )
+            if progress_callback:
+                progress_callback(25.0, "ASR device failed (e.g. missing CUDA library). Falling back to CPU...")
+            from faster_whisper import WhisperModel
+
+            self._model = WhisperModel(
+                self.model_size,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=self.num_threads,
+            )
+            audio_segments, info = _run_transcription(self._model, is_retry=True)
 
         if progress_callback:
             progress_callback(100.0, "Transcription completed.")

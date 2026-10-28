@@ -46,7 +46,9 @@ class VideoMetadata:
     def __post_init__(self) -> None:
         if not self.video_url and self.video_id:
             self.video_url = f"https://www.youtube.com/watch?v={self.video_id}"
-        if not self.thumbnail_url and self.video_id:
+        if not self.thumbnail_url and self.video_id and (
+            "youtube.com" in self.video_url or "youtu.be" in self.video_url
+        ):
             self.thumbnail_url = f"https://i.ytimg.com/vi/{self.video_id}/hqdefault.jpg"
 
     def to_dict(self) -> dict[str, Any]:

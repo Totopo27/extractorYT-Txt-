@@ -7,6 +7,7 @@ from extractoryt.asr.base import AudioTranscriberPort
 def get_transcriber(
     engine: str = "sherpa",
     model_size: str = "small",
+    device: str = "auto",
     **kwargs: Any,
 ) -> AudioTranscriberPort:
     """
@@ -21,12 +22,12 @@ def get_transcriber(
     if normalized_engine in ("sherpa", "sherpa-onnx", "onnx"):
         from extractoryt.asr.sherpa import SherpaOnnxTranscriber
 
-        return SherpaOnnxTranscriber(model_size=model_size, **kwargs)
+        return SherpaOnnxTranscriber(model_size=model_size, device=device, **kwargs)
 
     elif normalized_engine in ("faster-whisper", "fasterwhisper", "ctranslate2"):
         from extractoryt.asr.faster_whisper import FasterWhisperTranscriber
 
-        return FasterWhisperTranscriber(model_size=model_size, **kwargs)
+        return FasterWhisperTranscriber(model_size=model_size, device=device, **kwargs)
 
     raise ValueError(
         f"Unsupported ASR engine: '{engine}'. Available options are 'sherpa' or 'faster-whisper'."

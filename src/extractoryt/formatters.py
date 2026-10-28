@@ -55,7 +55,9 @@ class MarkdownFormatter:
         meta = result.metadata
         duration_label = format_timestamp(result.duration_seconds)
 
-        if result.source.startswith("asr"):
+        if result.source.startswith("local"):
+            status_label = "(Transcribed from Local Media)"
+        elif result.source.startswith("asr"):
             status_label = "(Transcribed via Offline ASR)"
         elif result.is_generated:
             status_label = "(Auto-generated Subtitles)"
@@ -68,11 +70,17 @@ class MarkdownFormatter:
             else f"- **Channel / Speaker**: {meta.author_name}"
         )
 
+        source_url_line = (
+            f"- **Source File**: `{meta.video_url}`"
+            if result.source.startswith("local")
+            else f"- **Original Video**: [{meta.video_url}]({meta.video_url})"
+        )
+
         lines: list[str] = [
             f"# {meta.title}",
             "",
             channel_line,
-            f"- **Original Video**: [{meta.video_url}]({meta.video_url})",
+            source_url_line,
             f"- **Language**: `{result.language}` {status_label}",
             f"- **Duration**: `{duration_label}`",
             f"- **Source**: `{result.source}`",

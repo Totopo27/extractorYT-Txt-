@@ -43,6 +43,7 @@ htmlcov/
 *.temp
 .cache/
 models/
+.atl/
 
 # IDE & OS
 .vscode/
